@@ -1,0 +1,4 @@
+gpu_count: 8
+compile: true
+max_chunks: 50
+timeout_seconds: 1800
