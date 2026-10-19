@@ -1,14 +1,15 @@
 """Reactor application for image-conditioned, camera-controlled WorldCrafter."""
-from collections import deque
+import asyncio
 from pathlib import Path
 
 from reactor_runtime import (
     ApplicationError, ClientInfo, CommandError, InputField, ReactorApp,
-    StepOutcome, UploadedFile, connected, disconnected, event,
-    session_started, session_ended, get_weights_path,
+    StepOutcome, TrackPayload, UploadedFile, connected, disconnected, event,
+    session_ended, get_weights_path,
 )
 from worldcrafter_assets import prepare_runtime, read_settings
 from worldcrafter_images import normalize_image
+from worldcrafter_camera import CameraPlanner
 from worldcrafter_model import WorldCrafterInput, WorldCrafterModel, WorldCrafterResult
 from worldcrafter_types import (
     ChunkGenerated, MotionQueued, PlaybackChanged, RolloutLimitReached,
@@ -28,14 +29,6 @@ class WorldCrafter(ReactorApp):
     def __init__(self):
         super().__init__()
         self._engine = None
-        self._image = None
-        self._prompt = ""
-        self._seed = 0
-        self._gravity = True
-        self._queue = deque()
-        self._paused = False
-        self._completed = 0
-        self._inflight = None
         self._max_chunks = 50
 
     def load(self, config_path: Path | None):
@@ -45,25 +38,9 @@ class WorldCrafter(ReactorApp):
         self._engine = WorldCrafterModel()
         self._engine.load(settings)
 
-    @session_started
-    def on_session_started(self):
-        self.state._world_id = 0
-        self.state._applied_world_id = None
-        self._image = None
-        self._prompt = ""
-        self._queue.clear()
-        self._completed = 0
-        self._inflight = None
-        self._paused = False
-
     @session_ended
     def on_session_ended(self):
         self._engine.reset()
-        self._image = None
-        self._prompt = ""
-        self._queue.clear()
-        self._inflight = None
-        self._completed = 0
 
     @connected
     async def on_connected(self, client: ClientInfo):
@@ -71,8 +48,6 @@ class WorldCrafter(ReactorApp):
 
     @disconnected
     async def on_disconnected(self):
-        self._queue.clear()
-        self._paused = True
         await self.send(self._snapshot())
 
     @event(name="start_world", description="Start a fresh world from an image and scene prompt; generates one stationary chunk. Returns `world_started` and broadcasts `state_update`. Fails with `invalid_image` or `prompt_required`.")
@@ -85,12 +60,12 @@ class WorldCrafter(ReactorApp):
     ) -> WorldStarted:
         if not prompt.strip():
             raise CommandError("prompt_required", "Provide a scene description.")
-        normalized = normalize_image(image)
-        self._image, self._prompt = normalized, prompt.strip()
-        self._seed, self._gravity = seed, gravity_align
+        normalized = await asyncio.to_thread(normalize_image, image)
+        self.state._image, self.state._prompt = normalized, prompt.strip()
+        self.state._seed, self.state._gravity = seed, gravity_align
         self._fresh_world()
         await self.send(self._snapshot())
-        return WorldStarted(world_id=self.state._world_id, seed=self._seed)
+        return WorldStarted(world_id=self.state._world_id, seed=self.state._seed)
 
     @event(name="move", description="Queue camera motion for 1–8 chunks. Translation amount is 0.1–5 units; rotation is 0.1–45 degrees per chunk. Returns `motion_queued` and broadcasts `state_update`. Fails with `image_required`, `invalid_motion`, `queue_full`, or `rollout_limit`.")
     async def move(
@@ -105,25 +80,25 @@ class WorldCrafter(ReactorApp):
             raise CommandError("invalid_motion", "Use a supported direction and bounded amount and chunk count.")
         if action in ACTIONS[:6] and amount > 5:
             raise CommandError("invalid_motion", "Translation must not exceed 5 units per chunk.")
-        if len(self._queue) + chunks > 16:
+        if len(self.state._queue) + chunks > 16:
             raise CommandError("queue_full", "At most 16 camera chunks may be queued.")
-        in_progress = int(self._inflight == self.state._world_id)
-        if self._completed + in_progress + len(self._queue) + chunks > self._max_chunks:
+        in_progress = int(self.state._inflight == self.state._world_id)
+        if self.state._completed + in_progress + len(self.state._queue) + chunks > self._max_chunks:
             raise CommandError("rollout_limit", "Reset or start a new world before adding more chunks.")
-        self._queue.extend([(action, amount)] * chunks)
+        self.state._queue.extend([(action, amount)] * chunks)
         await self.send(self._snapshot())
         return MotionQueued(action=action, chunks=chunks)
 
     @event(name="pause", description="Pause before the next chunk; an in-flight chunk may finish. Returns `playback_changed` and broadcasts `state_update`.")
     async def pause(self) -> PlaybackChanged:
-        self._paused = True
+        self.state._paused = True
         await self.send(self._snapshot())
         return PlaybackChanged(paused=True)
 
     @event(name="resume", description="Resume queued camera motion. Returns `playback_changed` and broadcasts `state_update`. Fails with `image_required`.")
     async def resume(self) -> PlaybackChanged:
         self._require_image()
-        self._paused = False
+        self.state._paused = False
         await self.send(self._snapshot())
         return PlaybackChanged(paused=False)
 
@@ -132,52 +107,62 @@ class WorldCrafter(ReactorApp):
         self._require_image()
         self._fresh_world()
         await self.send(self._snapshot())
-        return WorldStarted(world_id=self.state._world_id, seed=self._seed)
+        return WorldStarted(world_id=self.state._world_id, seed=self.state._seed)
 
     async def process_input(self) -> WorldCrafterInput:
-        if self._image is None or self._paused or not self._queue:
+        if self.state._image is None or self.state._paused or not self.state._queue:
             raise ApplicationError("Waiting for an image or camera motion.")
-        action, amount = self._queue.popleft()
+        action, amount = self.state._queue.popleft()
         world_id = self.state._world_id
-        self._inflight = world_id
-        return WorldCrafterInput(world_id, self._image if world_id != self.state._applied_world_id else None,
-                                 self._prompt, self._seed, self._gravity, action, amount)
+        self.state._inflight = world_id
+        local, world = self.state._planner.plan(action, amount)
+        return WorldCrafterInput(
+            world_id=world_id,
+            image=self.state._image if world_id != self.state._applied_world_id else None,
+            prompt=self.state._prompt, seed=self.state._seed,
+            gravity_align=self.state._gravity, local_poses=local, world_poses=world,
+        )
 
     def generate(self, input: WorldCrafterInput) -> WorldCrafterResult:
         return self._engine.generate(input)
 
     async def process_output(self, outcome: StepOutcome) -> WorldCrafterOutput | None:
-        self._inflight = None
+        self.state._inflight = None
         if outcome.error is not None:
             raise outcome.error
         result: WorldCrafterResult = outcome.result
         if result.world_id != self.state._world_id:
             return None
+        if self.state._applied_world_id != result.world_id:
+            self.state._planner.align_after_anchor(result.world_up)
         self.state._applied_world_id = result.world_id
-        self._completed = result.chunk_index + 1
+        self.state._completed = result.chunk_index + 1
         await self.send(ChunkGenerated(world_id=result.world_id, chunk_index=result.chunk_index,
                                       frames=len(result.frames), generation_seconds=outcome.elapsed,
                                       camera_end=result.camera_end, gravity_aligned=result.gravity_aligned,
                                       gpu_count=result.gpu_count))
-        if self._completed >= self._max_chunks:
-            self._queue.clear()
-            await self.send(RolloutLimitReached(completed_chunks=self._completed))
+        if self.state._completed >= self._max_chunks:
+            self.state._queue.clear()
+            await self.send(RolloutLimitReached(completed_chunks=self.state._completed))
         await self.send(self._snapshot())
-        return WorldCrafterOutput(main_video=result.frames)
+        metadata = [dict(world_id=result.world_id, chunk_index=result.chunk_index, frame_index=i)
+                    for i in range(len(result.frames))]
+        return WorldCrafterOutput(main_video=TrackPayload(result.frames, metadata=metadata))
 
     def _fresh_world(self):
         self.output.flush()
         self.state._world_id += 1
-        self._completed = 0
-        self._paused = False
-        self._queue.clear()
-        self._queue.append(("static", 0.0))
+        self.state._planner = CameraPlanner()
+        self.state._completed = 0
+        self.state._paused = False
+        self.state._queue.clear()
+        self.state._queue.append(("static", 0.0))
 
     def _require_image(self):
-        if self._image is None:
+        if self.state._image is None:
             raise CommandError("image_required", "Start a world with an image first.")
 
     def _snapshot(self):
-        return StateUpdate(world_id=self.state._world_id, image_selected=self._image is not None,
-                           paused=self._paused, completed_chunks=self._completed,
-                           queued_chunks=len(self._queue), max_chunks=self._max_chunks)
+        return StateUpdate(world_id=self.state._world_id, image_selected=self.state._image is not None,
+                           paused=self.state._paused, completed_chunks=self.state._completed,
+                           queued_chunks=len(self.state._queue), max_chunks=self._max_chunks)

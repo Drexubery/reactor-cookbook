@@ -13,7 +13,7 @@ from reactor_runtime.interface.model.contract import ModelContract
 from worldcrafter import WorldCrafter
 from worldcrafter_model import WorldCrafterInput, WorldCrafterModel, WorldCrafterResult
 from worldcrafter_types import WorldCrafterState, ChunkGenerated
-from worker import make_action
+from worldcrafter_camera import CameraPlanner
 
 
 def run(awaitable):
@@ -29,7 +29,6 @@ def ready():
         messages.append(message)
 
     app.send = send
-    app.on_session_started()
     return app, messages
 
 
@@ -44,8 +43,10 @@ def start(app):
 
 
 def result(world=1, chunk=0):
-    return WorldCrafterResult(world, chunk, np.zeros((33, 384, 640, 3), dtype=np.uint8),
-                             np.eye(4)[:3].tolist(), True, 8, (chunk + 1) * 33)
+    return WorldCrafterResult(world_id=world, chunk_index=chunk,
+        frames=np.zeros((33, 384, 640, 3), dtype=np.uint8),
+        camera_end=np.eye(4)[:3].tolist(), gravity_aligned=True, gpu_count=8,
+        world_up=[0., -1., 0.])
 
 
 def test_schema_surface():
@@ -72,7 +73,7 @@ def test_anchor_only_until_ack_and_runtime_elapsed():
     app, messages = ready()
     start(app)
     first = run(app.process_input())
-    assert first.image and first.world_id == 1 and first.action == "static"
+    assert first.image and first.world_id == 1 and np.allclose(first.world_poses, np.eye(4)[:3])
     with pytest.raises(FrozenInstanceError):
         first.seed = 12
     output = run(app.process_output(StepOutcome(result=result(), elapsed=1.25)))
@@ -81,7 +82,7 @@ def test_anchor_only_until_ack_and_runtime_elapsed():
     assert event.generation_seconds == 1.25 and event.gpu_count == 8
     run(app.move("yaw_left", 20, 1))
     second = run(app.process_input())
-    assert second.image is None and second.action == "yaw_left" and second.amount == 20
+    assert second.image is None and second.world_poses.shape == (66, 3, 4) and second.world_poses[-1, 0, 2] < 0
 
 
 def test_reset_rejects_stale_result_and_restarts_camera():
@@ -91,9 +92,9 @@ def test_reset_rejects_stale_result_and_restarts_camera():
     run(app.reset())
     count = len(messages)
     assert run(app.process_output(StepOutcome(result=result()))) is None
-    assert len(messages) == count and app._completed == 0
+    assert len(messages) == count and app.state._completed == 0
     fresh = run(app.process_input())
-    assert fresh.world_id == 2 and fresh.image and fresh.action == "static"
+    assert fresh.world_id == 2 and fresh.image and np.allclose(fresh.world_poses, np.eye(4)[:3])
 
 
 def test_model_failure_is_not_a_completed_chunk():
@@ -103,17 +104,17 @@ def test_model_failure_is_not_a_completed_chunk():
     count = len(messages)
     with pytest.raises(RuntimeError, match="GPU failed"):
         run(app.process_output(StepOutcome(error=RuntimeError("GPU failed"))))
-    assert len(messages) == count and app._completed == 0
+    assert len(messages) == count and app.state._completed == 0
 
 
 @pytest.mark.parametrize("action,amount", [("forward", 6), ("yaw_left", float("nan")), ("roll", 30)])
 def test_invalid_motion_does_not_enter_queue(action, amount):
     app, messages = ready()
     start(app)
-    before = list(app._queue)
+    before = list(app.state._queue)
     with pytest.raises(CommandError):
         run(app.move(action, amount, 1))
-    assert list(app._queue) == before
+    assert list(app.state._queue) == before
 
 
 def test_queue_limit_pause_resume_disconnect():
@@ -127,9 +128,10 @@ def test_queue_limit_pause_resume_disconnect():
     with pytest.raises(ApplicationError):
         run(app.process_input())
     run(app.resume())
-    assert run(app.process_input()).action == "static"
+    assert np.allclose(run(app.process_input()).world_poses, np.eye(4)[:3])
+    before = list(app.state._queue)
     run(app.on_disconnected())
-    assert not app._queue and app._paused
+    assert list(app.state._queue) == before and not app.state._paused
 
 
 def test_lifecycle_clears_image_and_resets_model():
@@ -139,9 +141,8 @@ def test_lifecycle_clears_image_and_resets_model():
     start(app)
     app.on_session_ended()
     app.state = WorldCrafterState()
-    app.on_session_started()
     assert calls == ["reset"]
-    assert app._image is None and not app._queue and app._completed == 0
+    assert app.state._image is None and not app.state._queue and app.state._completed == 0
 
 
 def test_generate_uses_only_snapshot():
@@ -149,32 +150,16 @@ def test_generate_uses_only_snapshot():
     calls = []
     expected = result()
     model.backend = SimpleNamespace(generate=lambda value: calls.append(value) or expected)
-    snapshot = WorldCrafterInput(1, b"image", "scene", 0, True, "forward", 1)
+    local, world = CameraPlanner().plan("static", 0)
+    snapshot = WorldCrafterInput(world_id=1, image=b"image", prompt="scene", seed=0,
+                               gravity_align=True, local_poses=local, world_poses=world)
     assert model.generate(snapshot) is expected and calls == [snapshot]
-
-
-@pytest.mark.parametrize("action,axis,sign", [
-    ("forward", "forward", 1), ("backward", "forward", -1),
-    ("yaw_left", "yaw", -1), ("yaw_right", "yaw", 1),
-    ("orbit_left", "yaw", 1), ("orbit_right", "yaw", -1),
-])
-def test_camera_sign_convention(action, axis, sign):
-    class Action:
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
-
-        def normalized(self):
-            return self
-
-    value = make_action(action, 2, Action)
-    assert getattr(value, axis) == sign * (2 if axis == "yaw" else 1)
-    assert value.orbit == action.startswith("orbit_")
 
 
 def test_invalid_image_does_not_replace_world():
     app, _ = ready()
     start(app)
-    old = app._image
+    old = app.state._image
     with pytest.raises(CommandError):
         run(app.start_world(SimpleNamespace(data=b"not image"), "scene", 0, True))
-    assert app._image is old and app.state._world_id == 1
+    assert app.state._image is old and app.state._world_id == 1

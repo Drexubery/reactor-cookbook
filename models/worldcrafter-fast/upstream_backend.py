@@ -1,6 +1,5 @@
 """Isolate Python 3.11/NumPy 1 inference from Python 3.12/NumPy 2 Reactor."""
 import atexit
-from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -107,12 +106,12 @@ class WorldCrafterBackend:
 
     def generate(self, input: WorldCrafterInput) -> WorldCrafterResult:
         with self._lock:
-            arguments = asdict(input)
-            image = arguments.pop("image")
-            arguments["has_image"] = image is not None
-            if image is not None:
-                (self._root / "anchor.png").write_bytes(image)
-            reply = self._request("generate", **arguments)
+            if input.image is not None:
+                (self._root / "anchor.image").write_bytes(input.image)
+            np.savez(self._root / "poses.npz", local=input.local_poses, world=input.world_poses)
+            reply = self._request("generate", world_id=input.world_id,
+                                  has_image=input.image is not None, prompt=input.prompt,
+                                  seed=input.seed, gravity_align=input.gravity_align)
             output = self._root / "frames.npy"
             try:
                 frames = np.load(output, allow_pickle=False)
@@ -122,12 +121,13 @@ class WorldCrafterBackend:
             finally:
                 output.unlink(missing_ok=True)
             return WorldCrafterResult(frames=frames, **{key: reply[key] for key in
-                ("world_id", "chunk_index", "camera_end", "gravity_aligned", "gpu_count", "memory_frames")})
+                ("world_id", "chunk_index", "camera_end", "gravity_aligned", "gpu_count", "world_up")})
 
     def reset(self):
         with self._lock:
             self._request("reset")
-            (self._root / "anchor.png").unlink(missing_ok=True)
+            (self._root / "anchor.image").unlink(missing_ok=True)
+            (self._root / "poses.npz").unlink(missing_ok=True)
 
     def close(self):
         if self._closed:

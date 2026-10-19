@@ -1,5 +1,6 @@
 """Python 3.11 inference worker; rank zero serves bounded local RPC requests."""
 import argparse
+import io
 import json
 import os
 from pathlib import Path
@@ -35,8 +36,7 @@ def main():
             return
 
     import numpy as np
-    from demo.camera import Camera
-    from worldcrafter.camera import Action
+    from PIL import Image, ImageOps
     if size == 8:
         from demo.multigpu.serving import ContextParallelEngine
         engine = ContextParallelEngine()
@@ -45,6 +45,7 @@ def main():
         engine = WorldCrafterEngine()
     world_id = None
     gravity_aligned = False
+    up = None
     cancel = threading.Event()
     connection = socket.socket(socket.AF_UNIX)
     connection.connect(args.socket)
@@ -64,6 +65,7 @@ def main():
                     engine.close_session()
                     world_id = None
                     gravity_aligned = False
+                    up = None
                     respond(dict(id=identity))
                     continue
                 if request["command"] != "generate":
@@ -72,24 +74,31 @@ def main():
                     if not request["has_image"]:
                         raise ValueError("A new world requires an anchor image")
                     up = None
+                    with Image.open(args.root / "anchor.image") as source:
+                        image = ImageOps.exif_transpose(source).convert("RGB")
                     if request["gravity_align"]:
                         from worldcrafter.calibration import calibrate_image
-                        up = calibrate_image(args.root / "anchor.png")["world_up"]
-                    engine.initialize_session(str(args.root / "anchor.png"), request["prompt"],
+                        up = calibrate_image(image)["world_up"]
+                    anchor = generation_image(image, engine.pipe.video_processor)
+                    engine.initialize_session(anchor, request["prompt"],
                                               request["seed"], args.max_chunks, cancel)
-                    engine.camera = Camera(world_up=up)
                     world_id = request["world_id"]
                     gravity_aligned = up is not None
                 if engine.index >= args.max_chunks:
                     raise ValueError("World chunk limit reached")
-                action = make_action(request["action"], request["amount"], Action)
-                result = engine.next_chunk(action)
+                with np.load(args.root / "poses.npz", allow_pickle=False) as poses:
+                    local, world = poses["local"], poses["world"]
+                expected = (33 * (engine.index + 1), 3, 4)
+                for value in (local, world):
+                    if value.shape != expected or value.dtype != np.float32 or not np.isfinite(value).all():
+                        raise ValueError("Invalid cumulative camera poses")
+                result = engine.next_chunk(None, poses=(local, world))
                 np.save(args.root / "frames.npy", result["frames"], allow_pickle=False)
                 reply = dict(id=identity, world_id=world_id, chunk_index=result["chunk_index"],
                              camera_end=result["global_pose"][-1].tolist(),
                              gravity_aligned=gravity_aligned, gpu_count=size,
-                             memory_frames=engine.index * 33)
-                print("REACTOR_CHUNK " + json.dumps(dict(reply, action=request["action"],
+                             world_up=up)
+                print("REACTOR_CHUNK " + json.dumps(dict(reply,
                       engine_mode=engine.info["gpu_mode"], rgb_sha256=result["rgb_sha256"],
                       memory=result["memory"])), flush=True)
                 respond(reply)
@@ -105,21 +114,18 @@ def main():
         connection.close()
 
 
-def make_action(name, amount, action_type):
-    if name == "static":
-        return action_type()
-    mapping = {"forward": ("forward", 1), "backward": ("forward", -1),
-               "left": ("right", -1), "right": ("right", 1),
-               "up": ("up", 1), "down": ("up", -1),
-               "yaw_left": ("yaw", -1), "yaw_right": ("yaw", 1),
-               "pitch_up": ("pitch", 1), "pitch_down": ("pitch", -1),
-               "orbit_left": ("yaw", 1), "orbit_right": ("yaw", -1),
-               "orbit_up": ("pitch", -1), "orbit_down": ("pitch", 1)}
-    axis, sign = mapping[name]
-    rotating = axis in ("yaw", "pitch")
-    return action_type(**{axis: sign * amount if rotating else sign},
-                       speed=1.0 if rotating else amount, orbit=name.startswith("orbit_"),
-                       orbit_radius=2.0 if name.startswith("orbit_") else 0.0).normalized()
+def generation_image(image, processor):
+    """Use native resize, then pass a small lossless image to the path-based engine.
+
+    GeoCalib receives the full-resolution upright RGB image before this call.
+    The engine's preprocessing sees the same resized pixels; resizing to the
+    same dimensions again is an identity operation.
+    """
+    resized = processor.resize(image, height=384, width=640)
+    buffer = io.BytesIO()
+    resized.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
 
 
 if __name__ == "__main__":

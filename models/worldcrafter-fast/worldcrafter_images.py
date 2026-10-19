@@ -1,8 +1,8 @@
-"""Decode and normalize uploads before accepting a world."""
+"""Validate uploads without expanding their encoded representation."""
 import io
 import warnings
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError
 from reactor_runtime import CommandError, UploadedFile
 
 
@@ -17,10 +17,8 @@ def normalize_image(image: UploadedFile) -> bytes:
                     raise ValueError("Unsupported format")
                 if min(source.size) < 64 or source.width * source.height > 20_000_000:
                     raise ValueError("Invalid dimensions")
-                rgb = ImageOps.exif_transpose(source).convert("RGB")
-                output = io.BytesIO()
-                rgb.save(output, format="PNG")
-                return output.getvalue()
+                source.load()
+                return image.data
     except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError,
             Image.DecompressionBombWarning) as exc:
         raise CommandError("invalid_image", "Use a valid PNG, JPEG or WebP, at least 64 pixels per side and at most 20 megapixels.") from exc

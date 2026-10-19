@@ -1,10 +1,23 @@
 """Commands report a shared world and a streamed RGB video track."""
+from collections import deque
+from dataclasses import field
+
 from reactor_runtime import InputState, MessageField, ModelMessage, Output, Video
+from worldcrafter_camera import CameraPlanner
 
 
 class WorldCrafterState(InputState):
     _world_id: int = 0
     _applied_world_id: int | None = None
+    _image: bytes | None = None
+    _prompt: str = ""
+    _seed: int = 0
+    _gravity: bool = True
+    _queue: deque = field(default_factory=deque)
+    _paused: bool = False
+    _completed: int = 0
+    _inflight: int | None = None
+    _planner: CameraPlanner = field(default_factory=CameraPlanner)
 
 
 class WorldCrafterOutput(Output):

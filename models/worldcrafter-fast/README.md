@@ -113,10 +113,24 @@ failure falls back to unaligned controls. No uncertainty threshold blocks
 exploration. Session end clears image, trajectory and model history; loaded
 weights remain resident for the next session.
 
+Viewers share one rollout and motion queue. Disconnecting one viewer does not
+pause it or discard accepted actions. Runtime suspends generation when no
+viewers remain and owns session teardown. Upload validation runs off the event
+loop; the original encoded image crosses to the worker, where full-resolution
+EXIF-corrected RGB is calibrated before native generation preprocessing.
+
+`process_input()` plans cumulative camera poses on the CPU. Immutable step
+inputs carry float32 local and world c2w arrays to the inference worker; the
+worker executes those poses without interpreting actions. Gravity is returned
+with the stationary anchor and applied before planning subsequent motion.
+
 Accepted commands return their typed result. `state_update` reports queue and
 world state. `chunk_generated` reports the chunk, runtime-measured duration,
 camera endpoint and participating GPU count. Video plays at 16 FPS; playback
 rate and generation throughput are different quantities.
+Each model frame carries `world_id`, `chunk_index` and zero-based `frame_index`
+metadata. These identify frames across resets and distinguish repeated pacer
+frames from new model output, including completely dark frames.
 
 ## Test with an actual client
 
@@ -126,13 +140,19 @@ with `pip install -r requirements-dev.txt`, then:
 ```bash
 python validate_client.py --url http://127.0.0.1:8090 \
   --image /absolute/path/image.png --prompt /absolute/path/prompt.txt \
-  --gpus 8 --full --output /absolute/path/validation
+  --gpus 8 --full --multi-viewer --output /absolute/path/validation
 ```
 
 The client uploads the image through Reactor, receives WebRTC frames, explores
 forward and turns left/right, resets the world, checks camera poses, and saves
-a decoded MP4 and a JSON report. It excludes Reactor's black connection/flush
-boundary frames from the captured model video.
+a decoded MP4 and a JSON report. It requires all 33 tagged frames for every
+announced chunk, including the reset world; missing or unexpected frames fail
+validation. Untagged Runtime connection/flush frames are excluded by identity,
+not brightness. Repeated tagged pacer frames are counted once. `--multi-viewer`
+also connects a second viewer, queues four chunks while paused, resumes and
+disconnects that viewer during the rollout. The remaining viewer must receive
+all four chunks without another resume. `--media-timeout` bounds delivery wait
+after completion; failures save a report listing the missing frame identities.
 A remote browser needs working WebRTC connectivity (host candidates or an
 appropriate TURN relay); forwarding the HTTP port alone does not establish
 video connectivity.
