@@ -1,0 +1,96 @@
+{
+  "status": "passed",
+  "videos": {
+    "h20": {
+      "status": "passed",
+      "decoded_frames": 297,
+      "active_gpus": 1,
+      "video_sha256": "57ec609d02bc8035d42353c09942fb6132ab6cf38e54099eba72ba6cc031c843"
+    },
+    "h200": {
+      "status": "passed",
+      "decoded_frames": 297,
+      "active_gpus": 8,
+      "video_sha256": "759d8c068e6e19d2a0ad1395a2aec03fbfa9d5426fdf933cf8168aa9f58d6351"
+    }
+  },
+  "source_files_verified": 22,
+  "archive_files_verified": 38,
+  "weight_files_verified": 43,
+  "eight_gpu_generated_chunks": 14,
+  "engine_mode": "cp_balanced_kv8",
+  "vae": [
+    {
+      "mode": "pipeline8",
+      "gpu_count": 8,
+      "warmed": true,
+      "stages": [
+        [
+          "input",
+          "middle"
+        ],
+        [
+          "up0_res0",
+          "up0_res1",
+          "up0_res2",
+          "up0_sample",
+          "up1_res0",
+          "up1_res1",
+          "up1_res2",
+          "up1_sample"
+        ],
+        [
+          "up2_res0",
+          "up2_res1"
+        ],
+        [
+          "up2_res2",
+          "up2_sample"
+        ],
+        [
+          "up3_res0"
+        ],
+        [
+          "up3_res1"
+        ],
+        [
+          "up3_res2"
+        ],
+        [
+          "output"
+        ]
+      ],
+      "transport": "owner_cuda_peer_copy",
+      "causal_cache": "per_stage_per_chunk",
+      "weight_dtype": "float32",
+      "compute_dtype": "bfloat16",
+      "compile_enabled": true,
+      "numerical_validation": {
+        "max_abs_error": 0.05078125,
+        "mean_abs_error": 0.0012368017341941595,
+        "finite": true,
+        "eager_max_abs_error": 0.0,
+        "eager_mean_abs_error": 0.0,
+        "repeat_exact": true,
+        "mean_limit": 0.01,
+        "max_limit": 0.5
+      },
+      "warmup_seconds": 365.04246403323486
+    }
+  ],
+  "reset_rgb_identical": true,
+  "motion_chunks_distinct": true,
+  "active_viewer_received_frames": 165,
+  "public_schema_unchanged": true,
+  "transport_fixture": {
+    "scope": "complete-frame loopback acceptance only",
+    "production_defaults_changed": false,
+    "codec": "Runtime default",
+    "fps": 16,
+    "WEBRTC_BWE_MIN_KBPS": 20000,
+    "WEBRTC_BWE_INITIAL_KBPS": 20000,
+    "WEBRTC_BWE_MAX_KBPS": 20000,
+    "WEBRTC_SENDER_MIN_KBPS": 20000,
+    "WEBRTC_SENDER_MAX_KBPS": 20000
+  }
+}

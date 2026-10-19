@@ -1,0 +1,8 @@
+{
+  "status": "passed",
+  "input_bytes": 14341876,
+  "retained_bytes": 14341876,
+  "upload_seconds": 0.17399506689980626,
+  "heartbeat_ticks": 19,
+  "max_loop_delay_seconds": 0.0006933796778321264
+}

@@ -1,0 +1,326 @@
+{
+  "status": "passed",
+  "gpu_count": 8,
+  "received_frames": 297,
+  "media": {
+    "expected_frames": 297,
+    "received_frames": 297,
+    "untagged_frames": 2,
+    "repeated_frames": 172,
+    "chunks": [
+      {
+        "world_id": 1,
+        "chunk_index": 0,
+        "expected_frames": 33,
+        "received_frames": 33
+      },
+      {
+        "world_id": 1,
+        "chunk_index": 1,
+        "expected_frames": 33,
+        "received_frames": 33
+      },
+      {
+        "world_id": 1,
+        "chunk_index": 2,
+        "expected_frames": 33,
+        "received_frames": 33
+      },
+      {
+        "world_id": 1,
+        "chunk_index": 3,
+        "expected_frames": 33,
+        "received_frames": 33
+      },
+      {
+        "world_id": 1,
+        "chunk_index": 4,
+        "expected_frames": 33,
+        "received_frames": 33
+      },
+      {
+        "world_id": 1,
+        "chunk_index": 5,
+        "expected_frames": 33,
+        "received_frames": 33
+      },
+      {
+        "world_id": 1,
+        "chunk_index": 6,
+        "expected_frames": 33,
+        "received_frames": 33
+      },
+      {
+        "world_id": 1,
+        "chunk_index": 7,
+        "expected_frames": 33,
+        "received_frames": 33
+      },
+      {
+        "world_id": 2,
+        "chunk_index": 0,
+        "expected_frames": 33,
+        "received_frames": 33
+      }
+    ]
+  },
+  "decoded_frames": 297,
+  "chunks": [
+    {
+      "camera_end": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ]
+      ],
+      "chunk_index": 0.0,
+      "frames": 33.0,
+      "generation_seconds": 48.862558882217854,
+      "gpu_count": 8.0,
+      "gravity_aligned": true,
+      "world_id": 1.0
+    },
+    {
+      "camera_end": [
+        [
+          1.0,
+          2.2205275803073894e-19,
+          2.224508871681441e-20,
+          0.00015428672486450523
+        ],
+        [
+          2.239456057662017e-19,
+          1.0,
+          -1.824227726977495e-18,
+          -0.06771763414144516
+        ],
+        [
+          4.646704458578322e-21,
+          -2.1826692400706083e-17,
+          1.0,
+          0.9673295617103577
+        ]
+      ],
+      "chunk_index": 1.0,
+      "frames": 33.0,
+      "generation_seconds": 2.3571531786583364,
+      "gpu_count": 8.0,
+      "gravity_aligned": true,
+      "world_id": 1.0
+    },
+    {
+      "camera_end": [
+        [
+          0.9432581067085266,
+          0.023060521110892296,
+          -0.3312588334083557,
+          0.0001591081963852048
+        ],
+        [
+          -0.023317819461226463,
+          0.999722957611084,
+          0.003198137041181326,
+          -0.06983381509780884
+        ],
+        [
+          0.33124080300331116,
+          0.004707565065473318,
+          0.9435344934463501,
+          0.9975586533546448
+        ]
+      ],
+      "chunk_index": 2.0,
+      "frames": 33.0,
+      "generation_seconds": 2.2851493321359158,
+      "gpu_count": 8.0,
+      "gravity_aligned": true,
+      "world_id": 1.0
+    },
+    {
+      "camera_end": [
+        [
+          0.9999440312385559,
+          0.0007385461358353496,
+          -0.010551713407039642,
+          0.0001591081963852048
+        ],
+        [
+          -0.0007387998048216105,
+          0.9999997019767761,
+          -2.014358869928401e-05,
+          -0.06983381509780884
+        ],
+        [
+          0.010551695711910725,
+          2.7938065613852814e-05,
+          0.9999443292617798,
+          0.9975586533546448
+        ]
+      ],
+      "chunk_index": 3.0,
+      "frames": 33.0,
+      "generation_seconds": 2.3814547639340162,
+      "gpu_count": 8.0,
+      "gravity_aligned": true,
+      "world_id": 1.0
+    },
+    {
+      "camera_end": [
+        [
+          1.0,
+          4.12518073407492e-18,
+          1.9131307831089792e-17,
+          0.0001976798812393099
+        ],
+        [
+          2.7471137567883673e-18,
+          1.0,
+          -1.824227726977495e-18,
+          -0.08676322549581528
+        ],
+        [
+          -3.603818141123668e-17,
+          -2.1826692400706083e-17,
+          1.0,
+          1.2393909692764282
+        ]
+      ],
+      "chunk_index": 4.0,
+      "frames": 33.0,
+      "generation_seconds": 2.2570219077169895,
+      "gpu_count": 8.0,
+      "gravity_aligned": true,
+      "world_id": 1.0
+    },
+    {
+      "camera_end": [
+        [
+          1.0,
+          4.12518073407492e-18,
+          1.9131307831089792e-17,
+          0.00023745691578369588
+        ],
+        [
+          2.7471137567883673e-18,
+          1.0,
+          -1.824227726977495e-18,
+          -0.10422167927026749
+        ],
+        [
+          -3.603818141123668e-17,
+          -2.1826692400706083e-17,
+          1.0,
+          1.4887807369232178
+        ]
+      ],
+      "chunk_index": 5.0,
+      "frames": 33.0,
+      "generation_seconds": 2.2967951078899205,
+      "gpu_count": 8.0,
+      "gravity_aligned": true,
+      "world_id": 1.0
+    },
+    {
+      "camera_end": [
+        [
+          1.0,
+          4.12518073407492e-18,
+          1.9131307831089792e-17,
+          0.0002772339794319123
+        ],
+        [
+          2.7471137567883673e-18,
+          1.0,
+          -1.824227726977495e-18,
+          -0.1216801255941391
+        ],
+        [
+          -3.603818141123668e-17,
+          -2.1826692400706083e-17,
+          1.0,
+          1.7381703853607178
+        ]
+      ],
+      "chunk_index": 6.0,
+      "frames": 33.0,
+      "generation_seconds": 2.2442689440213144,
+      "gpu_count": 8.0,
+      "gravity_aligned": true,
+      "world_id": 1.0
+    },
+    {
+      "camera_end": [
+        [
+          1.0,
+          4.12518073407492e-18,
+          1.9131307831089792e-17,
+          0.0003170110285282135
+        ],
+        [
+          2.7471137567883673e-18,
+          1.0,
+          -1.824227726977495e-18,
+          -0.1391385793685913
+        ],
+        [
+          -3.603818141123668e-17,
+          -2.1826692400706083e-17,
+          1.0,
+          1.9875600337982178
+        ]
+      ],
+      "chunk_index": 7.0,
+      "frames": 33.0,
+      "generation_seconds": 2.2507127500139177,
+      "gpu_count": 8.0,
+      "gravity_aligned": true,
+      "world_id": 1.0
+    }
+  ],
+  "reset": {
+    "camera_end": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ]
+    ],
+    "chunk_index": 0.0,
+    "frames": 33.0,
+    "generation_seconds": 2.6134930849075317,
+    "gpu_count": 8.0,
+    "gravity_aligned": true,
+    "world_id": 2.0
+  },
+  "camera_changes_verified": true,
+  "reset_pose_verified": true,
+  "multi_viewer_verified": true,
+  "transport": "Reactor SDK 1.10.0 / WebRTC"
+}
