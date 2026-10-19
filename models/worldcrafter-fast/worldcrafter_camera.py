@@ -4,6 +4,26 @@ import math
 import numpy as np
 
 FRAMES = 33
+TRANSLATIONS = ("forward", "backward", "left", "right", "up", "down")
+ROTATIONS = ("yaw_left", "yaw_right", "pitch_up", "pitch_down", "orbit_left", "orbit_right",
+             "orbit_up", "orbit_down")
+ACTIONS = TRANSLATIONS + ROTATIONS
+MAX_TRANSLATION = 5.0
+MAX_ROTATION = 45.0
+MAX_CHUNKS_PER_MOVE = 8
+
+
+def validate_motion(action: str, amount: float, chunks: int):
+    """Raise ValueError, with a reason for the client, unless the motion is plannable."""
+    if action not in ACTIONS:
+        raise ValueError("Use a supported camera direction.")
+    translation = action in TRANSLATIONS
+    limit = MAX_TRANSLATION if translation else MAX_ROTATION
+    if not math.isfinite(amount) or not 0.1 <= amount <= limit:
+        unit = "units" if translation else "degrees"
+        raise ValueError(f"{'Translation' if translation else 'Rotation'} must be 0.1 to {limit:g} {unit} per chunk.")
+    if not 1 <= chunks <= MAX_CHUNKS_PER_MOVE:
+        raise ValueError(f"Queue 1 to {MAX_CHUNKS_PER_MOVE} chunks per move.")
 
 
 def gravity_basis(up):

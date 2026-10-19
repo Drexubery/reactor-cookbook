@@ -37,6 +37,9 @@ build:
     - pip install --no-cache-dir uv==0.11.19
     # Reactor's run steps precede COPY; mount the preparation scripts read-only.
     - --mount=type=bind,source=.,target=/build WORLDCRAFTER_ROOT=/opt/worldcrafter UV_CACHE_DIR=/tmp/worldcrafter-uv UV_PYTHON_INSTALL_DIR=/opt/worldcrafter/python bash /build/prepare.sh && rm -rf /tmp/worldcrafter-uv
+    # GeoCalib loads its checkpoint through torch.hub; staging it under
+    # TORCH_HOME keeps calibration from downloading it at run time.
+    - mkdir -p /opt/worldcrafter/torch/hub/geocalib && curl -fsSL -o /opt/worldcrafter/torch/hub/geocalib/pinhole.tar https://github.com/cvg/GeoCalib/releases/download/v1.0/geocalib-pinhole.tar && echo "86d6aeacd8bbd974c59ce39f61854e00d36911c732ad89be471476fd708722ac  /opt/worldcrafter/torch/hub/geocalib/pinhole.tar" | sha256sum -c -
   system_packages:
     - git
     - curl
@@ -52,7 +55,7 @@ build:
     UV_CACHE_DIR: /local-ssd/cache/uv
     UV_PYTHON_INSTALL_DIR: /local-ssd/python
     HF_HOME: /local-ssd/cache/huggingface
-    TORCH_HOME: /local-ssd/cache/torch
+    TORCH_HOME: /opt/worldcrafter/torch
     XDG_CACHE_HOME: /local-ssd/cache
     TORCHINDUCTOR_CACHE_DIR: /local-ssd/cache/inductor
     TRITON_CACHE_DIR: /local-ssd/cache/triton
