@@ -3,22 +3,37 @@ import io
 import warnings
 
 from PIL import Image, UnidentifiedImageError
-from reactor_runtime import CommandError, UploadedFile
+
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_PIXELS = 20_000_000
+UPLOAD_FORMATS = ("PNG", "JPEG", "WEBP")
+UNDECODABLE = (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError,
+               Image.DecompressionBombWarning)
 
 
-def normalize_image(image: UploadedFile) -> bytes:
-    if not image.data or len(image.data) > 20 * 1024 * 1024:
-        raise CommandError("invalid_image", "Upload an image between 1 byte and 20 MiB.")
+def validate_image(data: bytes) -> bytes:
+    """Return the upload's original bytes once they decode as an acceptable image.
+
+    Raises:
+        ValueError: The upload is empty, too large, not PNG/JPEG/WebP, smaller
+            than 64 pixels per side, larger than 20 megapixels, or does not
+            decode.
+    """
+    if not data or len(data) > MAX_UPLOAD_BYTES:
+        raise ValueError("Upload size is outside 1 byte to 20 MiB")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(image.data)) as source:
-                if source.format not in ("PNG", "JPEG", "WEBP"):
-                    raise ValueError("Unsupported format")
-                if min(source.size) < 64 or source.width * source.height > 20_000_000:
-                    raise ValueError("Invalid dimensions")
-                source.load()
-                return image.data
-    except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError,
-            Image.DecompressionBombWarning) as exc:
-        raise CommandError("invalid_image", "Use a valid PNG, JPEG or WebP, at least 64 pixels per side and at most 20 megapixels.") from exc
+            with Image.open(io.BytesIO(data)) as source:
+                kind, (width, height) = source.format, source.size
+                acceptable = (kind in UPLOAD_FORMATS and min(width, height) >= 64
+                              and width * height <= MAX_UPLOAD_PIXELS)
+                if acceptable:
+                    source.load()
+    except UNDECODABLE as exc:
+        raise ValueError(f"Upload does not decode as an image: {exc}") from exc
+    if kind not in UPLOAD_FORMATS:
+        raise ValueError(f"Unsupported format {kind}")
+    if not acceptable:
+        raise ValueError(f"Unsupported dimensions {width}x{height}")
+    return data

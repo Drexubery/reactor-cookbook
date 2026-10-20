@@ -11,11 +11,14 @@ Python **3.11** / NumPy **1** environment because the Runtime requires Python
 **3.12** / NumPy **2**. Communication stays on a private local Unix socket;
 frames cross as uint8 RGB NumPy arrays without pickle. An eight-GPU worker
 uses the pinned upstream `torchrun` topology; it is not nested inside a
-second distributed launcher.
+second distributed launcher. Everything the worker prints, including its
+tracebacks, is forwarded to the Runtime's log under `worldcrafter.worker`.
 
 ## Versions and preparation
 
 - Source: `TencentARC/WorldCrafter@11712fe3a3f42cc448c10713a0b0ff79066e5935`.
+- GeoCalib checkpoint: `geocalib-pinhole.tar` from the `cvg/GeoCalib` `v1.0`
+  release, pinned by SHA-256.
 - Weights: `TencentARC/WorldCrafter-Fast@51320c3eb58a6313ccd6021a1da6d723d53e1a58`.
 - The upstream `uvenv/uv.lock` defines the inference environment, including CUDA 12.8 PyTorch.
 - One generation occupies the configured GPU group; eight GPUs do not imply eight concurrent worlds.
@@ -32,8 +35,10 @@ reactor run --gpus all --port 8090
 ```
 
 The image contains the pinned source and its frozen inference environment at
-`/opt/worldcrafter`. `prepare.sh` installs them during the build; it does not
-download weights. Reactor resolves the pinned `hf://` URI in `reactor.yaml`,
+`/opt/worldcrafter`. `prepare.sh` installs them during the build, and the build
+stages the hash-checked GeoCalib checkpoint under `/opt/worldcrafter/torch`,
+where calibration reads it, so calibration downloads nothing at run time. The
+build does not download weights. Reactor resolves the pinned `hf://` URI in `reactor.yaml`,
 mounts the weights separately and exposes them through `get_weights_path()`.
 To reuse a complete local checkpoint:
 
@@ -42,12 +47,21 @@ reactor run --gpus all --port 8090 --weights /absolute/path/WorldCrafter-Fast
 ```
 
 The adapter checks every required file against `weights-manifest.json`, whose
-sizes and SHA-256 hashes correspond to the pinned upstream snapshot. Every
+sizes and SHA-256 hashes correspond to the pinned upstream snapshot, and checks
+the GeoCalib checkpoint against its pinned hash. Every
 Runtime load hashes the complete checkpoint and writes an audit receipt to
 local scratch after success. Missing, truncated or corrupted files fail before
 GPU loading; repair partial checkpoints before retrying. Sessions reuse the
 resident model without loading or hashing the weights again.
 The checkpoint directory is never modified by validation.
+
+Loading ends with a warmup: the worker generates `warmup_chunks` chunks (two
+by default, set in `worldcrafter.yaml`) of a throwaway world and runs GeoCalib
+once before it reports ready, so compilation is paid before `/health` reports
+`state: available` rather than on a client's first chunk. `timeout_seconds`
+bounds that startup; each later call to the worker must answer within 180
+seconds. A worker that fails, times out or disconnects serves no further calls,
+and the next session end replaces it.
 
 Eight GPUs are the default. For a single-GPU smoke test set
 `-e WORLDCRAFTER_GPUS=1` on `reactor run`. Supported counts are
@@ -70,7 +84,7 @@ export WORLDCRAFTER_SCRATCH=/local-ssd/wc-reactor
 export UV_CACHE_DIR=/local-ssd/cache/uv
 export UV_PYTHON_INSTALL_DIR=/local-ssd/python
 export HF_HOME=/local-ssd/cache/huggingface
-export TORCH_HOME=/local-ssd/cache/torch
+export TORCH_HOME=/local-ssd/worldcrafter-reactor/torch
 export XDG_CACHE_HOME=/local-ssd/cache
 export TORCHINDUCTOR_CACHE_DIR=/local-ssd/cache/inductor
 export TRITON_CACHE_DIR=/local-ssd/cache/triton
@@ -80,6 +94,10 @@ export WORLDCRAFTER_GPUS=8
 export OMP_NUM_THREADS=8
 export TORCHINDUCTOR_COMPILE_THREADS=2
 bash prepare.sh
+mkdir -p "$TORCH_HOME/hub/geocalib"
+curl -fsSL -o "$TORCH_HOME/hub/geocalib/pinhole.tar" \
+  https://github.com/cvg/GeoCalib/releases/download/v1.0/geocalib-pinhole.tar
+echo "86d6aeacd8bbd974c59ce39f61854e00d36911c732ad89be471476fd708722ac  $TORCH_HOME/hub/geocalib/pinhole.tar" | sha256sum -c -
 HOST=127.0.0.1 PORT=8090 python -m reactor_runtime.serve
 ```
 
@@ -126,8 +144,8 @@ with the stationary anchor and applied before planning subsequent motion.
 
 Accepted commands return their typed result. `state_update` reports queue and
 world state. `chunk_generated` reports the chunk, runtime-measured duration,
-camera endpoint and participating GPU count. Video plays at 16 FPS; playback
-rate and generation throughput are different quantities.
+camera endpoint and participating GPU count. Playout follows generation: each
+chunk's 33 frames play over the time the chunk took to generate.
 Each model frame carries `world_id`, `chunk_index` and zero-based `frame_index`
 metadata. These identify frames across resets and distinguish repeated pacer
 frames from new model output, including completely dark frames.

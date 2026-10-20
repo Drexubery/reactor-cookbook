@@ -10,10 +10,15 @@ import pytest
 from reactor_runtime import ApplicationError, CommandError, StepOutcome
 from reactor_runtime.interface.model.contract import ModelContract
 
+import worldcrafter
+from upstream_backend import InferenceWorkerError
 from worldcrafter import WorldCrafter
-from worldcrafter_model import WorldCrafterInput, WorldCrafterModel, WorldCrafterResult
+from worldcrafter_model import (
+    InvalidPoses, NoAnchor, RolloutExhausted, WorldCrafterInput, WorldCrafterModel,
+    WorldCrafterResult,
+)
 from worldcrafter_types import WorldCrafterState, ChunkGenerated
-from worldcrafter_camera import CameraPlanner
+from worldcrafter_camera import FRAMES, CameraPlanner
 
 
 def run(awaitable):
@@ -52,6 +57,11 @@ def result(world=1, chunk=0):
 def test_schema_surface():
     contract = ModelContract.of(WorldCrafter)
     assert set(contract.commands) == {"start_world", "move", "pause", "resume", "reset"}
+
+
+def test_playout_follows_generation_time():
+    assert "fps" not in vars(WorldCrafter)
+    assert WorldCrafter.buffer_size == 2 * FRAMES
 
 
 def test_refused_step_never_calls_model():
@@ -107,14 +117,19 @@ def test_model_failure_is_not_a_completed_chunk():
     assert len(messages) == count and app.state._completed == 0
 
 
-@pytest.mark.parametrize("action,amount", [("forward", 6), ("yaw_left", float("nan")), ("roll", 30)])
-def test_invalid_motion_does_not_enter_queue(action, amount):
+@pytest.mark.parametrize("action,amount,reason", [
+    ("forward", 6, "Translation must be 0.1 to 5 units"),
+    ("yaw_left", float("nan"), "Rotation must be 0.1 to 45 degrees"),
+    ("roll", 30, "supported camera direction"),
+])
+def test_invalid_motion_does_not_enter_queue(action, amount, reason):
     app, messages = ready()
     start(app)
-    before = list(app.state._queue)
-    with pytest.raises(CommandError):
+    before, sent = list(app.state._queue), len(messages)
+    with pytest.raises(CommandError, match=reason) as error:
         run(app.move(action, amount, 1))
-    assert list(app.state._queue) == before
+    assert error.value.code == "invalid_motion"
+    assert list(app.state._queue) == before and len(messages) == sent
 
 
 def test_queue_limit_pause_resume_disconnect():
@@ -137,7 +152,7 @@ def test_queue_limit_pause_resume_disconnect():
 def test_lifecycle_clears_image_and_resets_model():
     app, _ = ready()
     calls = []
-    app._engine = SimpleNamespace(reset=lambda: calls.append("reset"))
+    app._engine = SimpleNamespace(healthy=True, reset=lambda: calls.append("reset"))
     start(app)
     app.on_session_ended()
     app.state = WorldCrafterState()
@@ -145,8 +160,44 @@ def test_lifecycle_clears_image_and_resets_model():
     assert app.state._image is None and not app.state._queue and app.state._completed == 0
 
 
+class FakeEngine:
+    def __init__(self, healthy=True, fail_reset=False):
+        self.healthy, self.fail_reset, self.calls = healthy, fail_reset, []
+
+    def reset(self):
+        self.calls.append("reset")
+        if self.fail_reset:
+            self.healthy = False
+            raise InferenceWorkerError("Inference worker did not answer")
+
+    def close(self):
+        self.calls.append("close")
+
+
+@pytest.mark.parametrize("engine,expected", [
+    (FakeEngine(fail_reset=True), ["reset", "close"]),
+    (FakeEngine(healthy=False), ["close"]),
+])
+def test_session_end_replaces_an_unhealthy_worker(monkeypatch, engine, expected):
+    app, _ = ready()
+    app._engine = engine
+    started = []
+    monkeypatch.setattr(app, "_start_engine", lambda: started.append(True))
+    app.on_session_ended()
+    assert engine.calls == expected and started == [True]
+
+
+def test_healthy_worker_is_kept_across_sessions(monkeypatch):
+    app, _ = ready()
+    app._engine = engine = FakeEngine()
+    monkeypatch.setattr(app, "_start_engine", lambda: pytest.fail("worker restarted"))
+    app.on_session_ended()
+    assert engine.calls == ["reset"]
+
+
 def test_generate_uses_only_snapshot():
     model = WorldCrafterModel()
+    model._max_chunks = 50
     calls = []
     expected = result()
     model.backend = SimpleNamespace(generate=lambda value: calls.append(value) or expected)
@@ -160,6 +211,76 @@ def test_invalid_image_does_not_replace_world():
     app, _ = ready()
     start(app)
     old = app.state._image
-    with pytest.raises(CommandError):
+    with pytest.raises(CommandError) as error:
         run(app.start_world(SimpleNamespace(data=b"not image"), "scene", 0, True))
+    assert error.value.code == "invalid_image"
     assert app.state._image is old and app.state._world_id == 1
+
+
+def test_internal_image_bug_is_not_reported_as_invalid_upload(monkeypatch):
+    app, _ = ready()
+
+    def broken(data):
+        raise KeyError("bug")
+
+    monkeypatch.setattr(worldcrafter, "validate_image", broken)
+    with pytest.raises(KeyError):
+        run(app.start_world(image(), "scene", 0, True))
+
+
+class FakeBackend:
+    def __init__(self):
+        self.healthy, self.steps, self.resets = True, [], 0
+
+    def generate(self, input):
+        index = len(self.steps)
+        self.steps.append(input)
+        return result(world=input.world_id, chunk=index)
+
+    def reset(self):
+        self.resets += 1
+        self.steps.clear()
+
+
+@pytest.fixture
+def model():
+    instance = WorldCrafterModel()
+    instance.backend, instance._max_chunks = FakeBackend(), 2
+    return instance
+
+
+def step(world_id, planner, image=b"png", action="static", amount=0.0):
+    local, world = planner.plan(action, amount)
+    return WorldCrafterInput(world_id=world_id, image=image, prompt="scene", seed=3,
+                             gravity_align=True, local_poses=local, world_poses=world)
+
+
+def test_model_refuses_a_new_world_without_anchor(model):
+    with pytest.raises(NoAnchor):
+        model.generate(step(1, CameraPlanner(), image=None))
+    assert model.backend.steps == []
+
+
+def test_model_stops_at_its_chunk_limit(model):
+    planner = CameraPlanner()
+    model.generate(step(1, planner))
+    model.generate(step(1, planner, image=None, action="forward", amount=1.0))
+    with pytest.raises(RolloutExhausted):
+        model.generate(step(1, planner, image=None, action="forward", amount=1.0))
+    assert len(model.backend.steps) == 2
+
+
+def test_model_rejects_poses_for_another_chunk(model):
+    planner = CameraPlanner()
+    planner.plan("static", 0.0)
+    with pytest.raises(InvalidPoses):
+        model.generate(step(1, planner))
+    assert model.backend.steps == []
+
+
+def test_model_reset_drops_the_world(model):
+    model.generate(step(1, CameraPlanner()))
+    model.reset()
+    assert model.backend.resets == 1
+    with pytest.raises(NoAnchor):
+        model.generate(step(1, CameraPlanner(), image=None))

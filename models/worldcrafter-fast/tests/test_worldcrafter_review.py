@@ -12,7 +12,7 @@ from reactor_runtime import StepOutcome
 from test_worldcrafter import ready, result, run, start
 from validate_client import FrameLedger
 from worldcrafter_camera import CameraPlanner
-from worldcrafter_images import normalize_image
+from worldcrafter_images import validate_image
 from worldcrafter_types import WorldCrafterState
 
 
@@ -51,9 +51,9 @@ def test_large_jpeg_stays_encoded_and_upload_is_off_loop(monkeypatch):
 
     def validate(value):
         called.append(threading.get_ident())
-        return normalize_image(value)
+        return validate_image(value)
 
-    monkeypatch.setattr(worldcrafter, "normalize_image", validate)
+    monkeypatch.setattr(worldcrafter, "validate_image", validate)
     app, _ = ready()
     run(app.start_world(upload, "A courtyard", 42, True))
     assert called and called[0] != loop_thread

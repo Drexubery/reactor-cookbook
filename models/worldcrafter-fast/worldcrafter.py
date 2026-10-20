@@ -7,40 +7,55 @@ from reactor_runtime import (
     StepOutcome, TrackPayload, UploadedFile, connected, disconnected, event,
     session_ended, get_weights_path,
 )
+from reactor_runtime.log import get_logger
+from upstream_backend import InferenceWorkerError
 from worldcrafter_assets import prepare_runtime, read_settings
-from worldcrafter_images import normalize_image
-from worldcrafter_camera import CameraPlanner
+from worldcrafter_images import validate_image
+from worldcrafter_camera import ACTIONS, FRAMES, CameraPlanner, validate_motion
 from worldcrafter_model import WorldCrafterInput, WorldCrafterModel, WorldCrafterResult
 from worldcrafter_types import (
     ChunkGenerated, MotionQueued, PlaybackChanged, RolloutLimitReached,
     StateUpdate, WorldCrafterOutput, WorldCrafterState, WorldStarted,
 )
 
-ACTIONS = ("forward", "backward", "left", "right", "up", "down", "yaw_left",
-           "yaw_right", "pitch_up", "pitch_down", "orbit_left", "orbit_right",
-           "orbit_up", "orbit_down")
+logger = get_logger(__name__)
 
 
 class WorldCrafter(ReactorApp):
     state: WorldCrafterState
-    buffer_size = 33
-    fps = 16
+    buffer_size = 2 * FRAMES
 
     def __init__(self):
         super().__init__()
         self._engine = None
+        self._settings = None
         self._max_chunks = 50
 
     def load(self, config_path: Path | None):
         settings = read_settings(config_path, weights_path=get_weights_path())
         prepare_runtime(settings)
+        self._settings = settings
         self._max_chunks = settings.max_chunks
+        self._start_engine()
+
+    def _start_engine(self):
+        """Start the inference worker; it reports ready once loaded and warmed up."""
         self._engine = WorldCrafterModel()
-        self._engine.load(settings)
+        self._engine.load(self._settings)
 
     @session_ended
     def on_session_ended(self):
-        self._engine.reset()
+        """Release the live world and keep the weights; replace a worker that failed."""
+        if self._engine.healthy:
+            try:
+                self._engine.reset()
+            except InferenceWorkerError:
+                logger.exception("WorldCrafter inference worker failed to reset")
+        if not self._engine.healthy:
+            logger.error("WorldCrafter inference worker is unhealthy; restarting it")
+            self._engine.close()
+            self._start_engine()
+        self.output.flush()
 
     @connected
     async def on_connected(self, client: ClientInfo):
@@ -60,8 +75,11 @@ class WorldCrafter(ReactorApp):
     ) -> WorldStarted:
         if not prompt.strip():
             raise CommandError("prompt_required", "Provide a scene description.")
-        normalized = await asyncio.to_thread(normalize_image, image)
-        self.state._image, self.state._prompt = normalized, prompt.strip()
+        try:
+            validated = await asyncio.to_thread(validate_image, image.data)
+        except ValueError as exc:
+            raise CommandError("invalid_image", "Use a valid PNG, JPEG or WebP, at least 64 pixels per side and at most 20 megapixels.") from exc
+        self.state._image, self.state._prompt = validated, prompt.strip()
         self.state._seed, self.state._gravity = seed, gravity_align
         self._fresh_world()
         await self.send(self._snapshot())
@@ -74,12 +92,11 @@ class WorldCrafter(ReactorApp):
         amount: float = InputField(default=1.0, ge=0.1, le=45.0, description="Distance or rotation degrees per chunk."),
         chunks: int = InputField(default=1, ge=1, le=8, description="Number of consecutive chunks."),
     ) -> MotionQueued:
-        import math
         self._require_image()
-        if action not in ACTIONS or not math.isfinite(amount) or not 0.1 <= amount <= 45 or not 1 <= chunks <= 8:
-            raise CommandError("invalid_motion", "Use a supported direction and bounded amount and chunk count.")
-        if action in ACTIONS[:6] and amount > 5:
-            raise CommandError("invalid_motion", "Translation must not exceed 5 units per chunk.")
+        try:
+            validate_motion(action, amount, chunks)
+        except ValueError as exc:
+            raise CommandError("invalid_motion", str(exc)) from exc
         if len(self.state._queue) + chunks > 16:
             raise CommandError("queue_full", "At most 16 camera chunks may be queued.")
         in_progress = int(self.state._inflight == self.state._world_id)
@@ -129,6 +146,10 @@ class WorldCrafter(ReactorApp):
     async def process_output(self, outcome: StepOutcome) -> WorldCrafterOutput | None:
         self.state._inflight = None
         if outcome.error is not None:
+            # process_input refuses every step NoAnchor, RolloutExhausted and
+            # InvalidPoses could fail on, so what arrives here is a GPU or
+            # worker failure. A reset does not repair those: end the session,
+            # and @session_ended replaces the worker.
             raise outcome.error
         result: WorldCrafterResult = outcome.result
         if result.world_id != self.state._world_id:

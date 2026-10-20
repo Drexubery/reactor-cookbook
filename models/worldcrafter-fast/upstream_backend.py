@@ -1,6 +1,7 @@
 """Isolate Python 3.11/NumPy 1 inference from Python 3.12/NumPy 2 Reactor."""
 import atexit
 import json
+import logging
 import os
 from pathlib import Path
 import signal
@@ -14,15 +15,25 @@ import numpy as np
 
 from worldcrafter_model import WorldCrafterInput, WorldCrafterResult
 
+WORKER = Path(__file__).with_name("worker.py")
+# A warmed-up chunk takes a few seconds; the bound leaves room for a shape the
+# warmup did not compile and covers a collective that never returns.
+CALL_TIMEOUT_SECONDS = 180.0
+worker_logger = logging.getLogger("worldcrafter.worker")
+
+
+class InferenceWorkerError(RuntimeError):
+    """The inference worker failed, timed out or disconnected; it serves no further calls."""
+
 
 class WorldCrafterBackend:
     def __init__(self, settings):
         self._settings = settings
         self._lock = threading.Lock()
         self._process = None
+        self._relay = None
         self._connection = None
         self._stream = None
-        self._log = None
         self._temporary = tempfile.TemporaryDirectory(prefix="wc-", dir=settings.scratch)
         self._root = Path(self._temporary.name)
         self._sequence = 0
@@ -46,59 +57,74 @@ class WorldCrafterBackend:
             WORLDCRAFTER_VAE_MODE="pipeline8" if settings.gpu_count == 8 else "single",
             WORLDCRAFTER_KV_FUSION="rope",
             WORLDCRAFTER_CONTROL_SOCKET=str(self._root / "control.sock"),
+            TORCH_HOME=str(settings.torch_home),
         )
-        worker = str(Path(__file__).with_name("worker.py"))
         command = [str(settings.python)]
         if settings.gpu_count == 8:
             command += ["-m", "torch.distributed.run", "--standalone", "--nproc-per-node=8"]
-        command += [worker, "--socket", endpoint, "--source", str(settings.source),
-                    "--root", str(self._root), "--max-chunks", str(settings.max_chunks)]
-        self._log = (settings.scratch / f"worker-{self._root.name}.log").open("w")
+        command += [str(WORKER), "--socket", endpoint, "--source", str(settings.source),
+                    "--root", str(self._root), "--max-chunks", str(settings.max_chunks),
+                    "--warmup-chunks", str(settings.warmup_chunks)]
         try:
             self._process = subprocess.Popen(command, cwd=settings.source, env=environment,
-                                             stdout=self._log, stderr=subprocess.STDOUT,
+                                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                              start_new_session=True)
+            self._relay = threading.Thread(target=_relay, args=(self._process.stdout,),
+                                           name="worldcrafter-worker-log", daemon=True)
+            self._relay.start()
             deadline = time.monotonic() + settings.timeout
             while True:
                 if self._process.poll() is not None:
-                    raise RuntimeError(f"Inference worker exited; inspect {self._log.name}")
+                    raise InferenceWorkerError(f"Inference worker exited with code {self._process.returncode} during startup")
                 if time.monotonic() >= deadline:
-                    raise TimeoutError(f"Inference worker startup timed out; inspect {self._log.name}")
+                    raise InferenceWorkerError("Inference worker startup timed out")
                 try:
                     self._connection, _ = self._listener.accept()
                     break
                 except socket.timeout:
                     continue
-            self._connection.settimeout(settings.timeout)
+            # Startup loads the model and runs the warmup before the worker reports ready.
+            self._connection.settimeout(max(1.0, deadline - time.monotonic()))
             self._stream = self._connection.makefile("rwb")
             ready = self._receive()
             if ready.get("gpu_count") != settings.gpu_count:
-                raise RuntimeError("Loaded GPU count does not match configuration")
+                raise InferenceWorkerError("Loaded GPU count does not match configuration")
+            self._connection.settimeout(CALL_TIMEOUT_SECONDS)
             atexit.register(self.close)
         except BaseException:
             self.close()
             raise
 
+    @property
+    def healthy(self) -> bool:
+        return not self._closed
+
     def _receive(self):
-        line = self._stream.readline(4 * 1024 * 1024)
+        try:
+            line = self._stream.readline(4 * 1024 * 1024)
+        except OSError as exc:
+            raise InferenceWorkerError(f"Inference worker did not answer: {exc}") from exc
         if not line or not line.endswith(b"\n"):
-            raise RuntimeError("Inference worker disconnected or sent an invalid response")
+            raise InferenceWorkerError("Inference worker disconnected or sent an invalid response")
         result = json.loads(line)
         if "error" in result:
-            raise RuntimeError(result["error"])
+            raise InferenceWorkerError(result["error"])
         return result
 
     def _request(self, command, **arguments):
         if self._closed:
-            raise RuntimeError("Inference worker is closed")
+            raise InferenceWorkerError("Inference worker is closed")
         self._sequence += 1
         request_id = self._sequence
         try:
-            self._stream.write((json.dumps(dict(id=request_id, command=command, **arguments)) + "\n").encode())
-            self._stream.flush()
+            try:
+                self._stream.write((json.dumps(dict(id=request_id, command=command, **arguments)) + "\n").encode())
+                self._stream.flush()
+            except OSError as exc:
+                raise InferenceWorkerError(f"Inference worker is unreachable: {exc}") from exc
             reply = self._receive()
             if reply.get("id") != request_id:
-                raise RuntimeError("Inference worker response identity mismatch")
+                raise InferenceWorkerError("Inference worker response identity mismatch")
             return reply
         except BaseException:
             self.close()
@@ -133,6 +159,7 @@ class WorldCrafterBackend:
         if self._closed:
             return
         self._closed = True
+        atexit.unregister(self.close)
         if self._stream is not None:
             self._stream.close()
         if self._connection is not None:
@@ -145,6 +172,15 @@ class WorldCrafterBackend:
             except subprocess.TimeoutExpired:
                 os.killpg(self._process.pid, signal.SIGKILL)
                 self._process.wait(timeout=10)
-        if self._log is not None:
-            self._log.close()
+        if self._relay is not None:
+            self._relay.join(timeout=5)
         self._temporary.cleanup()
+
+
+def _relay(stream):
+    """Forward each line the worker prints to the Runtime's logging."""
+    with stream:
+        for raw in iter(stream.readline, b""):
+            line = raw.decode(errors="replace").rstrip()
+            if line:
+                worker_logger.info(line)

@@ -7,7 +7,10 @@ from pathlib import Path
 import socket
 import sys
 import threading
+import time
 import traceback
+
+WARMUP_PROMPT = "A first-person view of a quiet, softly lit courtyard."
 
 
 def main():
@@ -16,6 +19,7 @@ def main():
     parser.add_argument("--source", required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--max-chunks", type=int, required=True)
+    parser.add_argument("--warmup-chunks", type=int, required=True)
     args = parser.parse_args()
     sys.path.insert(0, args.source)
     rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -47,6 +51,7 @@ def main():
     gravity_aligned = False
     up = None
     cancel = threading.Event()
+    warm_up(engine, args.warmup_chunks, args.max_chunks, cancel)
     connection = socket.socket(socket.AF_UNIX)
     connection.connect(args.socket)
     stream = connection.makefile("rwb")
@@ -112,6 +117,28 @@ def main():
             engine.shutdown()
         stream.close()
         connection.close()
+
+
+def warm_up(engine, chunks, max_chunks, cancel):
+    """Pay compilation and GeoCalib start-up before reporting ready, on a throwaway world."""
+    if chunks == 0:
+        return
+    import numpy as np
+    from PIL import Image
+    from worldcrafter.calibration import calibrate_image
+    from worldcrafter_camera import CameraPlanner
+    started = time.monotonic()
+    gradient = np.linspace(0, 255, 640, dtype=np.uint8)[None, :, None].repeat(384, 0).repeat(3, 2)
+    image = Image.fromarray(gradient)
+    calibrate_image(image)
+    engine.initialize_session(generation_image(image, engine.pipe.video_processor),
+                              WARMUP_PROMPT, 0, max_chunks, cancel)
+    planner = CameraPlanner()
+    for index in range(chunks):
+        poses = planner.plan("static", 0.0) if index == 0 else planner.plan("forward", 1.0)
+        engine.next_chunk(None, poses=poses)
+    engine.close_session()
+    print(f"WorldCrafter warmup complete: {chunks} chunks in {time.monotonic() - started:.1f} s", flush=True)
 
 
 def generation_image(image, processor):

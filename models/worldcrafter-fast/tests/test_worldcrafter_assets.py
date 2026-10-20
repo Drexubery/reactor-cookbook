@@ -126,3 +126,30 @@ def test_existing_source_is_not_overwritten(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="nonempty"):
         prepare_source.main()
     assert user_file.read_text() == "keep"
+
+
+@pytest.fixture
+def geocalib(tmp_path, monkeypatch):
+    payload = b"geocalib checkpoint"
+    monkeypatch.setattr(assets, "GEOCALIB_SIZE", len(payload))
+    monkeypatch.setattr(assets, "GEOCALIB_SHA256", hashlib.sha256(payload).hexdigest())
+    path = tmp_path/"torch"/assets.GEOCALIB_FILE
+    path.parent.mkdir(parents=True)
+    path.write_bytes(payload)
+    return path
+
+
+def test_staged_geocalib_checkpoint_passes(geocalib):
+    assets.verify_geocalib(geocalib)
+
+
+def test_missing_geocalib_checkpoint_fails_before_any_download(geocalib):
+    geocalib.unlink()
+    with pytest.raises(FileNotFoundError, match="GeoCalib"):
+        assets.verify_geocalib(geocalib)
+
+
+def test_corrupt_geocalib_checkpoint_fails(geocalib):
+    geocalib.write_bytes(b"geocalib checkpoinX")
+    with pytest.raises(ValueError, match="checksum"):
+        assets.verify_geocalib(geocalib)
