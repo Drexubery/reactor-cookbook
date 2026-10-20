@@ -146,11 +146,19 @@ class WorldCrafter(ReactorApp):
     async def process_output(self, outcome: StepOutcome) -> WorldCrafterOutput | None:
         self.state._inflight = None
         if outcome.error is not None:
-            # process_input refuses every step NoAnchor, RolloutExhausted and
-            # InvalidPoses could fail on, so what arrives here is a GPU or
-            # worker failure. A reset does not repair those: end the session,
-            # and @session_ended replaces the worker.
-            raise outcome.error
+            if not isinstance(outcome.error, InferenceWorkerError):
+                raise outcome.error
+            # Escaping process_output ends the Runtime's model loop. Recover
+            # an expected worker failure here, under the Runtime's step lock.
+            # A replacement cannot continue the lost world's scene memory.
+            logger.error("WorldCrafter inference worker failed; rebuilding once",
+                         error=str(outcome.error))
+            self._engine.close()
+            self._fresh_world()
+            self.state._paused = True
+            await self.send(self._snapshot())
+            await asyncio.to_thread(self._start_engine)
+            return None
         result: WorldCrafterResult = outcome.result
         if result.world_id != self.state._world_id:
             return None

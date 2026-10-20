@@ -1,7 +1,7 @@
 $schema: reactor/v2
 model:
   name: worldcrafter-fast
-  version: v0.1.0
+  version: v0.1.1
   description: Explore an image with camera-controlled video and persistent scene memory.
   resources:
     gpu:

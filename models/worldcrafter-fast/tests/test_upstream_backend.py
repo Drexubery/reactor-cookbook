@@ -92,3 +92,36 @@ def test_hung_worker_times_out_and_is_stopped(backend, monkeypatch):
         worker.reset()
     assert time.monotonic() - started < 10
     assert not worker.healthy and worker._process.poll() is not None
+
+
+def test_dead_worker_cleanup_preserves_error_and_reaps_process(backend):
+    worker = backend("ok")
+    original = worker._stream
+
+    class BrokenStream:
+        def write(self, data):
+            raise BrokenPipeError("worker disappeared")
+
+        def close(self):
+            original.close()
+            raise BrokenPipeError("buffered close also failed")
+
+    worker._stream = BrokenStream()
+    root = worker._root
+    with pytest.raises(InferenceWorkerError, match="worker is unreachable"):
+        worker.reset()
+    assert not worker.healthy
+    assert worker._process.poll() is not None
+    assert worker._connection.fileno() == -1
+    assert worker._listener.fileno() == -1
+    assert not root.exists()
+    worker.close()
+
+
+def test_exited_worker_disconnect_is_recoverable(backend):
+    worker = backend("ok")
+    worker._process.kill()
+    worker._process.wait(timeout=5)
+    with pytest.raises(InferenceWorkerError):
+        worker.reset()
+    assert not worker.healthy and not worker._root.exists()

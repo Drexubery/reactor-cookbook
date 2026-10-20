@@ -1,5 +1,6 @@
 """Isolate Python 3.11/NumPy 1 inference from Python 3.12/NumPy 2 Reactor."""
 import atexit
+from contextlib import suppress
 import json
 import logging
 import os
@@ -160,17 +161,20 @@ class WorldCrafterBackend:
             return
         self._closed = True
         atexit.unregister(self.close)
-        if self._stream is not None:
-            self._stream.close()
-        if self._connection is not None:
-            self._connection.close()
-        self._listener.close()
+        # Buffered socket close can flush into a dead worker. Cleanup must
+        # still reap the process and preserve the original inference error.
+        for resource in (self._stream, self._connection, self._listener):
+            if resource is not None:
+                with suppress(OSError):
+                    resource.close()
         if self._process is not None and self._process.poll() is None:
-            os.killpg(self._process.pid, signal.SIGTERM)
+            with suppress(ProcessLookupError):
+                os.killpg(self._process.pid, signal.SIGTERM)
             try:
                 self._process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                os.killpg(self._process.pid, signal.SIGKILL)
+                with suppress(ProcessLookupError):
+                    os.killpg(self._process.pid, signal.SIGKILL)
                 self._process.wait(timeout=10)
         if self._relay is not None:
             self._relay.join(timeout=5)

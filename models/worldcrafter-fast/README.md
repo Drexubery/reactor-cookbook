@@ -60,8 +60,15 @@ by default, set in `worldcrafter.yaml`) of a throwaway world and runs GeoCalib
 once before it reports ready, so compilation is paid before `/health` reports
 `state: available` rather than on a client's first chunk. `timeout_seconds`
 bounds that startup; each later call to the worker must answer within 180
-seconds. A worker that fails, times out or disconnects serves no further calls,
-and the next session end replaces it.
+seconds. A worker that fails, times out or disconnects serves no further calls.
+The adapter attempts one replacement and broadcasts a `state_update` with a new
+world ID, zero completed chunks and `paused: true`. Exploration history and
+queued motion are discarded because the worker's scene memory is lost; the
+selected image, prompt and seed are retained. After replacement, send `resume`
+or `reset` to generate a fresh anchor, or `start_world` to select another image.
+Other viewers remain connected. If replacement itself fails, the Runtime exits
+with an error rather than repeatedly restarting. Session cleanup also replaces
+a worker that fails during reset.
 
 Eight GPUs are the default. For a single-GPU smoke test set
 `-e WORLDCRAFTER_GPUS=1` on `reactor run`. Supported counts are
