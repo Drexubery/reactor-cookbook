@@ -284,3 +284,98 @@ def test_model_reset_drops_the_world(model):
     assert model.backend.resets == 1
     with pytest.raises(NoAnchor):
         model.generate(step(1, CameraPlanner(), image=None))
+
+
+def test_failed_worker_restarts_once_and_pauses_a_fresh_world(monkeypatch):
+    app, messages = ready()
+    start(app)
+    run(app.process_input())
+    run(app.process_output(StepOutcome(result=result())))
+    run(app.move("forward", 1, 4))
+    run(app.process_input())
+    app._engine = engine = FakeEngine(healthy=False)
+    replacements = []
+    monkeypatch.setattr(app, "_start_engine", lambda: replacements.append(True))
+    messages.clear()
+    output = run(app.process_output(StepOutcome(error=InferenceWorkerError("worker died"))))
+    assert output is None and engine.calls == ["close"] and replacements == [True]
+    assert app.state._inflight is None and app.state._paused
+    assert app.state._completed == 0 and app.state._world_id == 2
+    assert list(app.state._queue) == [("static", 0.0)]
+    assert len(messages) == 1 and messages[0].paused and messages[0].completed_chunks == 0
+    with pytest.raises(ApplicationError):
+        run(app.process_input())
+    run(app.resume())
+    fresh = run(app.process_input())
+    assert fresh.image == image().data and fresh.seed == 42
+    assert fresh.world_id == 2 and np.allclose(fresh.world_poses, np.eye(4)[:3])
+
+
+def test_replacement_failure_is_not_retried(monkeypatch):
+    app, messages = ready()
+    start(app)
+    run(app.process_input())
+    app._engine = FakeEngine(healthy=False)
+    attempts = []
+
+    def fail():
+        attempts.append(True)
+        raise InferenceWorkerError("replacement failed")
+
+    monkeypatch.setattr(app, "_start_engine", fail)
+    with pytest.raises(InferenceWorkerError, match="replacement failed"):
+        run(app.process_output(StepOutcome(error=InferenceWorkerError("worker died"))))
+    assert attempts == [True] and app.state._paused
+    assert not any(isinstance(message, ChunkGenerated) for message in messages)
+
+
+def test_runtime_loop_survives_worker_failure_and_emits_after_resume(monkeypatch):
+    import threading
+
+    async def scenario():
+        app, messages = ready()
+        app._on_loop_ready()
+        app._live.set()
+        await app.start_world(image(), "A stone courtyard, first person.", 42, True)
+        app._engine = FakeEngine(healthy=False)
+        recovered = threading.Event()
+        emitted = asyncio.Event()
+        calls = []
+
+        def replace():
+            recovered.set()
+
+        def generate(snapshot):
+            calls.append(snapshot)
+            if len(calls) == 1:
+                raise InferenceWorkerError("worker died")
+            return result(world=snapshot.world_id)
+
+        async def emit(output, **kwargs):
+            assert output.main_video.shape[0] == 33
+            emitted.set()
+
+        # Exercise the installed Runtime's real step loop; stub only GPU and wire.
+        monkeypatch.setattr(app, "_start_engine", replace)
+        monkeypatch.setattr(app, "generate", generate)
+        monkeypatch.setattr(app, "emit", emit)
+        monkeypatch.setattr(app, "_report_step", lambda *args: None)
+        task = asyncio.create_task(app.run())
+        try:
+            # Recovery runs on a thread; keep its completion flag thread-safe.
+            async def recovery_finished():
+                while not recovered.is_set():
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(recovery_finished(), timeout=5)
+            async with app._step_lock:
+                await app.resume()
+            await asyncio.wait_for(emitted.wait(), timeout=5)
+            assert not task.done()
+            assert len(calls) == 2 and calls[1].image is not None
+            completed = [m for m in messages if isinstance(m, ChunkGenerated)]
+            assert len(completed) == 1 and completed[0].world_id == 2
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    run(scenario())
